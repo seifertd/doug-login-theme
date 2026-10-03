@@ -77,7 +77,7 @@ def disk_lines():
         if len(f) == 4 and f[1] == "crypto_LUKS":
             model = subprocess.run(["lsblk", "-dno", "MODEL", f"/dev/{f[3]}"],
                                    capture_output=True, text=True).stdout.strip().replace('"', "")
-            name = f[0] + (f"  ·  {model}" if model else "")
+            name = f[0] + (f"  |  {model}" if model else "")
             lines.append(f'DISK["luks-{f[2]}"] = "{name}";\n')
     return "".join(lines)
 

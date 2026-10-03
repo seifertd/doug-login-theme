@@ -33,6 +33,8 @@ GEN = 4127;                          // decorative
 SPEED = 0.7;
 LABELS = 1;                          // explanatory annotations
 FONT = "JetBrainsMono Nerd Font Mono";   // must contain "Mono" for label-freetype
+// Keep every displayed string ASCII: the initramfs only has the label-freetype
+// renderer, which draws characters like "·" or "…" as a missing-glyph box.
 
 DX = 20;                             // offset of a CoW copy from its original
 DY = -20;
@@ -308,7 +310,7 @@ if (IsPlaceholder(SUBVOL, "SUBVOL")) HANDOFF_TEXT = "mounting root";
 else HANDOFF_TEXT = "mounting subvol=" + SUBVOL;
 MODE = Plymouth.GetMode();
 if (MODE == "shutdown" || MODE == "reboot")
-  IDLE_CAPTION = "syncing  ·  committing the final transaction";
+  IDLE_CAPTION = "syncing  |  committing the final transaction";
 else
   IDLE_CAPTION = "btrfs never overwrites a block: changes are written as new copies, then a new root is committed";
 
@@ -354,13 +356,13 @@ fun ApplyImages() {
 
 // Text images depend on S (font size).
 fun MakeTexts() {
-  HANDOFF.SetImage(Txt(HANDOFF_TEXT + "  ·  starting " + SESSION, COL_TEXT, 22));
-  ANN_OLD.SetImage(Txt("old root  ·  gen " + GEN + "  ·  still intact", COL_TEXT, 16));
-  ANN_NEW.SetImage(Txt("new root  ·  gen " + (GEN + 1) + "  ·  uncommitted", COL_ACC, 16));
+  HANDOFF.SetImage(Txt(HANDOFF_TEXT + "  |  starting " + SESSION, COL_TEXT, 22));
+  ANN_OLD.SetImage(Txt("old root  |  gen " + GEN + "  |  still intact", COL_TEXT, 16));
+  ANN_NEW.SetImage(Txt("new root  |  gen " + (GEN + 1) + "  |  uncommitted", COL_ACC, 16));
   CAP_IDLE.SetImage(Txt(IDLE_CAPTION, COL_DIM, 16));
-  CAP_TYPING.SetImage(Txt("each keystroke copies a leaf and its path up to the root  ·  untouched blocks are shared, never overwritten", COL_DIM, 16));
+  CAP_TYPING.SetImage(Txt("each keystroke copies a leaf and its path up to the root  |  untouched blocks are shared, never overwritten", COL_DIM, 16));
   if (!IsPlaceholder(HOST, "HOST")) {
-    FOOTER.SetImage(Txt(HOST + "  ·  linux " + KERNEL, COL_DIM, 15));
+    FOOTER.SetImage(Txt(HOST + "  |  linux " + KERNEL, COL_DIM, 15));
     FOOTER.SetOpacity(0.8);
   }
   CAPS.SetImage(Txt("caps lock", COL_AMBER, 14));
@@ -567,13 +569,13 @@ fun Abort() {
   global.SHAKE_T = T;
   global.FLASH_T = T;
   global.ATTEMPT = ATTEMPT + 1;
-  SetMessage("transaction aborted  ·  generation " + GEN + " unchanged  ·  attempt " + ATTEMPT, COL_ERR);
+  SetMessage("transaction aborted  |  generation " + GEN + " unchanged  |  attempt " + ATTEMPT, COL_ERR);
 }
 
 fun Commit() {
   global.PHASE = "commit";
   global.PHASE_T = T;
-  SetMessage("transaction committed  ·  generation " + (GEN + 1), COL_OK);
+  SetMessage("transaction committed  |  generation " + (GEN + 1), COL_OK);
 }
 
 // A different device asking, or a prompt after we already committed.
@@ -655,7 +657,7 @@ fun OnNormal() {
   else if (PROMPT_VISIBLE && (PHASE == "input" || PHASE == "abort")) {
     global.PHASE = "check";
     global.PHASE_T = T;
-    SetMessage("unlocking …", COL_TEXT);
+    SetMessage("unlocking ...", COL_TEXT);
   }
 }
 

@@ -15,12 +15,12 @@ build() {
     host=$(cat /etc/hostname 2>/dev/null) || host=$(uname -n)
     subvol=$(sed -n 's/.*rootflags=[^ ]*subvol=\([^ ,]*\).*/\1/p' /proc/cmdline)
 
-    # One DISK["luks-<uuid>"] = "<device>  ·  <drive model>"; line per LUKS partition.
+    # One DISK["luks-<uuid>"] = "<device>  |  <drive model>"; line per LUKS partition.
     disks=$(mktemp) || return 1
     while read -r name fstype uuid pk; do
         [[ $fstype == crypto_LUKS && -n $uuid ]] || continue
         model=$(lsblk -dno MODEL "/dev/$pk" 2>/dev/null | sed 's/ *$//; s/"//g')
-        printf 'DISK["luks-%s"] = "%s%s";\n' "$uuid" "$name" "${model:+  ·  $model}"
+        printf 'DISK["luks-%s"] = "%s%s";\n' "$uuid" "$name" "${model:+  |  $model}"
     done < <(lsblk -rno NAME,FSTYPE,UUID,PKNAME) > "$disks"
 
     # Through a real file, not a pipe: add_file cmp's the source against the

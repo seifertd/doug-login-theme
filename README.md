@@ -33,7 +33,7 @@ make disable    # back to owl-multihead (or PREVIOUS=name) and rebuild
 - systemd names the disk in its prompt by GPT partition label (often just
   "root"). The theme looks up the `luks-<uuid>` volume name from the prompt
   instead and shows the device and drive model, e.g.
-  "passphrase for nvme0n1p2 · KINGSTON SA2000M81000G".
+  "passphrase for nvme0n1p2 | KINGSTON SA2000M81000G".
 - The script re-lays itself out when displays change. At boot Plymouth can
   start before the real GPU driver (e.g. nvidia-drm) takes over the display.
 
