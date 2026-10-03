@@ -1,11 +1,12 @@
 #!/bin/bash
 # mkinitcpio install hook: fills in the btrfs-cow Plymouth theme's per-image
-# values (hostname, kernel version, root subvolume) inside the initramfs.
+# values (hostname, kernel version, root subvolume, LUKS disk names) inside
+# the initramfs.
 # Must run after the plymouth hook, which copies the theme in; the drop-in
 # 20-btrfs-cow-theme.conf appends it to HOOKS for that reason.
 
 build() {
-    local theme script host subvol
+    local theme script host subvol tmp disks name fstype uuid pk model
     theme=$(plymouth-set-default-theme)
     [[ $theme == btrfs-cow ]] || return 0
     script="/usr/share/plymouth/themes/$theme/$theme.script"
@@ -14,15 +15,28 @@ build() {
     host=$(cat /etc/hostname 2>/dev/null) || host=$(uname -n)
     subvol=$(sed -n 's/.*rootflags=[^ ]*subvol=\([^ ,]*\).*/\1/p' /proc/cmdline)
 
+    # One DISK["luks-<uuid>"] = "<device>  ·  <drive model>"; line per LUKS partition.
+    disks=$(mktemp) || return 1
+    while read -r name fstype uuid pk; do
+        [[ $fstype == crypto_LUKS && -n $uuid ]] || continue
+        model=$(lsblk -dno MODEL "/dev/$pk" 2>/dev/null | sed 's/ *$//; s/"//g')
+        printf 'DISK["luks-%s"] = "%s%s";\n' "$uuid" "$name" "${model:+  ·  $model}"
+    done < <(lsblk -rno NAME,FSTYPE,UUID,PKNAME) > "$disks"
+
+    # Through a real file, not a pipe: add_file cmp's the source against the
+    # copy the plymouth hook already added, which eats the start of a pipe.
+    tmp=$(mktemp) || return 1
     sed -e "s|@HOST@|${host}|g" \
         -e "s|@KERNEL@|${KERNELVERSION}|g" \
         -e "s|@SUBVOL@|${subvol:-/}|g" \
-        "$script" | add_file - "$script" 644
+        "$script" | awk -v f="$disks" '$0 == "// @DISKS@" { while ((getline l < f) > 0) print l; next } { print }' > "$tmp"
+    add_file "$tmp" "$script" 644
+    rm -f "$tmp" "$disks"
 }
 
 help() {
     cat <<HELPEOF
-Fills in hostname, kernel version and root subvolume for the btrfs-cow
-Plymouth theme. Does nothing unless btrfs-cow is the default theme.
+Fills in hostname, kernel version, root subvolume and LUKS disk names for the
+btrfs-cow Plymouth theme. Does nothing unless btrfs-cow is the default theme.
 HELPEOF
 }

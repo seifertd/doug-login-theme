@@ -17,7 +17,13 @@ NAME=btrfs-cow-preview
 SRC=build/preview/$NAME
 DEST=/usr/share/plymouth/themes/$NAME
 PASS=${PASS:-btrfs}
-PROMPT=${PROMPT:-"Please enter passphrase for disk Samsung SSD 970 EVO Plus 1TB (luks-fb1903f3-b4b0-4ab9-a4b6-7b2d339dbe99):"}
+# Default: the prompt systemd-cryptsetup sends at boot for the LUKS volume
+# holding / (it names the disk by GPT partition label, the volume luks-<uuid>).
+if [[ -z ${PROMPT:-} ]]; then
+    uuid=$(findmnt -no SOURCE / | sed -n 's|.*/luks-\([0-9a-f-]*\).*|\1|p')
+    label=$(lsblk -rno UUID,PARTLABEL | awk -v u="$uuid" '$1 == u { print $2 }')
+    PROMPT="Please enter passphrase for disk ${label:-disk} (luks-${uuid:-0000}):"
+fi
 LOG=$PWD/build/preview.log
 
 [[ -d $SRC ]] || { echo "run 'make' first" >&2; exit 1; }

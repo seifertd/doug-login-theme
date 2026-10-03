@@ -21,6 +21,11 @@
 HOST = "@HOST@";
 KERNEL = "@KERNEL@";
 SUBVOL = "@SUBVOL@";
+// Nicer names for LUKS volumes, keyed by the volume name systemd puts in
+// "(...)" at the end of its prompt (its own disk name is the GPT partition
+// label, e.g. "root"). One line per volume: DISK["luks-<uuid>"] = "...";
+DISK["-"] = "";
+// @DISKS@
 
 // ---------------------------------------------------------------- settings
 SESSION = "Hyprland";
@@ -54,25 +59,21 @@ COL_AMBER = Rgb(242, 179, 94);
 Window.SetBackgroundTopColor(0.024, 0.031, 0.047);
 Window.SetBackgroundBottomColor(0.024, 0.031, 0.047);
 
-// Canvas = largest display. Scale everything down if any display is
-// smaller than the 1920x1080 design.
+// The displays can change after the script starts: at boot Plymouth may begin
+// with no display, or with the firmware framebuffer, and only get the real GPU
+// (nvidia-drm) a second later. Layout() measures the displays and (re)builds
+// everything that depends on them; it runs at start, on hotplug, and whenever
+// display 0 changes size. Until there is a display, S stays 0 and nothing is
+// drawn, but passphrase state is still tracked.
 CANVAS_W = 0;
 CANVAS_H = 0;
-S = 1;
-for (gi = 0; gi < 8; gi++) {
-  if (!Window.GetWidth(gi)) break;
-  CANVAS_W = Math.Max(CANVAS_W, Window.GetWidth(gi));
-  CANVAS_H = Math.Max(CANVAS_H, Window.GetHeight(gi));
-  S = Math.Min(S, Math.Min(Window.GetWidth(gi) / 1920, Window.GetHeight(gi) / 1080));
-}
-if (CANVAS_W == 0) {
-  CANVAS_W = Window.GetWidth();
-  CANVAS_H = Window.GetHeight();
-}
-CANVAS_X = Window.GetX();
-CANVAS_Y = Window.GetY();
-CX = CANVAS_X + CANVAS_W / 2;
-CY = CANVAS_Y + CANVAS_H / 2;
+CANVAS_X = 0;
+CANVAS_Y = 0;
+CX = 0;
+CY = 0;
+S = 0;                               // design -> screen scale; 0 = not laid out yet
+SEEN_W = -1;
+SEEN_H = -1;
 
 fun PX(x) { return CX + (x - 960) * S; }
 fun PY(y) { return CY + (y - 540) * S; }
@@ -84,26 +85,30 @@ fun Img(name) {
   return local.im;
 }
 
+BLANK = Image("blank.png");
 fun Txt(text, col, px) {
-  return Image.Text(text, col.r, col.g, col.b, 1, FONT + " " + Math.Int(px * 0.75 * S + 0.5));
+  local.sc = S;
+  if (local.sc <= 0) local.sc = 1;
+  local.im = Image.Text(text, col.r, col.g, col.b, 1, FONT + " " + Math.Int(px * 0.75 * local.sc + 0.5));
+  // A text that can't be rendered must not take the rest of the theme down.
+  if (!local.im) local.im = BLANK;
+  return local.im;
 }
 
-fun NewSprite(im, z) {
-  local.s = Sprite(im);
+fun NewSprite(z) {
+  local.s = Sprite();
   local.s.SetZ(z);
   local.s.SetOpacity(0);
   return local.s;
 }
 
-fun TextSprite(text, col, px, z) {
-  return NewSprite(Txt(text, col, px), z);
-}
-
-// Place by centre / top-left / right-edge-and-centre, in design coordinates.
+// Place by centre / top-left / right edge / left edge, in design coordinates.
 fun PlaceC(spr, x, y) {
   local.im = spr.GetImage();
-  spr.SetX(PX(x) - local.im.GetWidth() / 2);
-  spr.SetY(PY(y) - local.im.GetHeight() / 2);
+  if (local.im) {
+    spr.SetX(PX(x) - local.im.GetWidth() / 2);
+    spr.SetY(PY(y) - local.im.GetHeight() / 2);
+  }
 }
 fun PlaceTL(spr, x, y) {
   spr.SetX(PX(x));
@@ -111,13 +116,17 @@ fun PlaceTL(spr, x, y) {
 }
 fun PlaceR(spr, x, y) {
   local.im = spr.GetImage();
-  spr.SetX(PX(x) - local.im.GetWidth());
-  spr.SetY(PY(y) - local.im.GetHeight() / 2);
+  if (local.im) {
+    spr.SetX(PX(x) - local.im.GetWidth());
+    spr.SetY(PY(y) - local.im.GetHeight() / 2);
+  }
 }
 fun PlaceL(spr, x, y) {
   local.im = spr.GetImage();
-  spr.SetX(PX(x));
-  spr.SetY(PY(y) - local.im.GetHeight() / 2);
+  if (local.im) {
+    spr.SetX(PX(x));
+    spr.SetY(PY(y) - local.im.GetHeight() / 2);
+  }
 }
 
 fun Ease(k) {
@@ -172,39 +181,65 @@ fun GeomName(c) {
 KIND[0] = "root"; KIND[1] = "inner"; KIND[2] = "leaf";
 NSTYLE[0] = "base"; NSTYLE[1] = "ghost"; NSTYLE[2] = "acc"; NSTYLE[3] = "white";
 NSTYLE[4] = "ok"; NSTYLE[5] = "err"; NSTYLE[6] = "ring";
-for (gi = 0; gi < 3; gi++)
-  for (gj = 0; gj < 7; gj++)
-    NIMG[KIND[gi]][NSTYLE[gj]] = Img("node-" + KIND[gi] + "-" + NSTYLE[gj] + ".png");
-
 GEOM[0] = "ri-l"; GEOM[1] = "ri-m"; GEOM[2] = "ri-r";
 GEOM[3] = "il-l"; GEOM[4] = "il-m"; GEOM[5] = "il-r";
 ESTYLE[0] = "base"; ESTYLE[1] = "ghost"; ESTYLE[2] = "acc"; ESTYLE[3] = "ok"; ESTYLE[4] = "mixed";
-for (gi = 0; gi < 6; gi++)
-  for (gj = 0; gj < 5; gj++)
-    EIMG[GEOM[gi]][ESTYLE[gj]] = Img("edge-" + GEOM[gi] + "-" + ESTYLE[gj] + ".png");
-
-for (gi = 0; gi < 7; gi++) PIMG[gi] = Img("pulse-" + gi + ".png");
-
 PCOL[0] = "acc"; PCOL[1] = "err"; PCOL[2] = "ok";
-for (gi = 0; gi < 3; gi++) {
-  PANEL_IMG[PCOL[gi]] = Img("panel-" + PCOL[gi] + ".png");
-  LOCK_IMG[PCOL[gi]] = Img("lock-" + PCOL[gi] + ".png");
-  BUL_IMG[PCOL[gi]] = Img("bullet-" + PCOL[gi] + ".png");
-}
-RING_IMG = Img("commit-ring.png");
+DSIZE[0] = 4; DSIZE[1] = 7; DSIZE[2] = 10; DSIZE[3] = 13;
 
-// ---------------------------------------------------------------- sprites: tree
+// Loads every image at the current scale S.
+fun LoadImages() {
+  local.i = 0;
+  while (local.i < 3) {
+    local.j = 0;
+    while (local.j < 7) {
+      global.NIMG[KIND[local.i]][NSTYLE[local.j]] = Img("node-" + KIND[local.i] + "-" + NSTYLE[local.j] + ".png");
+      local.j = local.j + 1;
+    }
+    global.PANEL_IMG[PCOL[local.i]] = Img("panel-" + PCOL[local.i] + ".png");
+    global.LOCK_IMG[PCOL[local.i]] = Img("lock-" + PCOL[local.i] + ".png");
+    global.BUL_IMG[PCOL[local.i]] = Img("bullet-" + PCOL[local.i] + ".png");
+    local.i = local.i + 1;
+  }
+  local.i = 0;
+  while (local.i < 6) {
+    local.j = 0;
+    while (local.j < 5) {
+      global.EIMG[GEOM[local.i]][ESTYLE[local.j]] = Img("edge-" + GEOM[local.i] + "-" + ESTYLE[local.j] + ".png");
+      local.j = local.j + 1;
+    }
+    local.i = local.i + 1;
+  }
+  local.i = 0;
+  while (local.i < 7) {
+    global.PIMG[local.i] = Img("pulse-" + local.i + ".png");
+    local.i = local.i + 1;
+  }
+  local.i = 0;
+  while (local.i < 4) {
+    global.DIMG[local.i] = Img("drift-" + DSIZE[local.i] + ".png");
+    local.i = local.i + 1;
+  }
+  global.RING_IMG = Img("commit-ring.png");
+  global.CURSOR_IMG = Img("cursor.png");
+  // scaled to the canvas in PlaceAll()
+  global.VIGNETTE_SRC = Image("vignette.png");
+  global.RED_SRC = Image("pixel-red.png");
+  global.BLACK_SRC = Image("pixel-black.png");
+  global.BLOOM_SRC = Image("bloom.png");
+}
+
+// ---------------------------------------------------------------- sprites
+// Created empty; ApplyImages() and MakeTexts() give them images once there
+// is a display to size them for.
 for (gi = 0; gi < NN; gi++) {
-  gk = node[gi].kind;
-  NS[gi].base = NewSprite(NIMG[gk]["base"], 10);
-  NS[gi].ghost = NewSprite(NIMG[gk]["ghost"], 11);
-  NS[gi].acc = NewSprite(NIMG[gk]["acc"], 20);
-  NS[gi].white = NewSprite(NIMG[gk]["white"], 21);
-  NS[gi].ok = NewSprite(NIMG[gk]["ok"], 22);
-  NS[gi].ring = NewSprite(NIMG[gk]["ring"], 23);
-  NS[gi].shard = NewSprite(NIMG[gk]["err"], 40);
-  PlaceC(NS[gi].base, node[gi].x, node[gi].y);
-  PlaceC(NS[gi].ghost, node[gi].x, node[gi].y);
+  NS[gi].base = NewSprite(10);
+  NS[gi].ghost = NewSprite(11);
+  NS[gi].acc = NewSprite(20);
+  NS[gi].white = NewSprite(21);
+  NS[gi].ok = NewSprite(22);
+  NS[gi].ring = NewSprite(23);
+  NS[gi].shard = NewSprite(40);
   cowBorn[gi] = -1;
   cowRem[gi] = -1;
   cowTouch[gi] = NEVER;
@@ -216,87 +251,202 @@ for (gi = 0; gi < NN; gi++) {
 for (gi = 0; gi < NN; gi++) {
   gp = node[gi].parent;
   if (gp < 0) continue;
-  gg = GeomName(gi);
+  E[gi].geom = GeomName(gi);
   E[gi].hx = Math.Min(node[gp].x, node[gi].x) - EDGE_PAD;
   E[gi].hy = node[gp].y + node[gp].h / 2 - EDGE_PAD;
-  ES[gi].base = NewSprite(EIMG[gg]["base"], 5);
-  ES[gi].ghost = NewSprite(EIMG[gg]["ghost"], 6);
-  ES[gi].acc = NewSprite(EIMG[gg]["acc"], 7);
-  ES[gi].mixed = NewSprite(EIMG[gg]["mixed"], 7);
-  ES[gi].ok = NewSprite(EIMG[gg]["ok"], 8);
-  PlaceTL(ES[gi].base, E[gi].hx, E[gi].hy);
-  PlaceTL(ES[gi].ghost, E[gi].hx, E[gi].hy);
   // copied parent (offset) -> untouched original child
-  PlaceTL(ES[gi].mixed, Math.Min(node[gp].x + DX, node[gi].x) - EDGE_PAD, E[gi].hy + DY);
+  E[gi].mx = Math.Min(node[gp].x + DX, node[gi].x) - EDGE_PAD;
+  E[gi].my = E[gi].hy + DY;
+  ES[gi].base = NewSprite(5);
+  ES[gi].ghost = NewSprite(6);
+  ES[gi].acc = NewSprite(7);
+  ES[gi].mixed = NewSprite(7);
+  ES[gi].ok = NewSprite(8);
 }
 
 for (gi = 0; gi < 4; gi++) {
   PULSE[gi].t0 = NEVER;
   PULSE[gi].leaf = LEAF[0];
-  for (gj = 0; gj < 7; gj++) PULSE_S[gi][gj] = NewSprite(PIMG[gj], 30);
+  for (gj = 0; gj < 7; gj++) PULSE_S[gi][gj] = NewSprite(30);
 }
 
-// ---------------------------------------------------------------- sprites: background
-VIGNETTE = Sprite(Image("vignette.png").Scale(CANVAS_W, CANVAS_H));
-VIGNETTE.SetPosition(CANVAS_X, CANVAS_Y, -100);
-
-DSIZE[0] = 4; DSIZE[1] = 7; DSIZE[2] = 10; DSIZE[3] = 13;
+VIGNETTE = NewSprite(-100);
+VIGNETTE.SetOpacity(1);
 DRIFT_N = 46;
 for (gi = 0; gi < DRIFT_N; gi++) {
-  DR[gi].x = CANVAS_X + Math.Random() * CANVAS_W;
-  DR[gi].y = CANVAS_Y + Math.Random() * CANVAS_H;
-  DR[gi].v = (0.004 + Math.Random() * 0.012) * S;
-  DR[gi].s = NewSprite(Img("drift-" + DSIZE[Math.Int(Math.Random() * 4)] + ".png"), -50);
-  DR[gi].s.SetPosition(DR[gi].x, DR[gi].y, -50);
+  DR[gi].size = Math.Int(Math.Random() * 4);
+  DR[gi].fx = Math.Random();         // position as a fraction of the canvas
+  DR[gi].fy = Math.Random();
+  DR[gi].v = 0.004 + Math.Random() * 0.012;
+  DR[gi].s = NewSprite(-50);
   DR[gi].s.SetOpacity(0.03 + Math.Random() * 0.07);
 }
 
-// ---------------------------------------------------------------- sprites: overlays
-RED = NewSprite(Image("pixel-red.png").Scale(CANVAS_W, CANVAS_H), 60);
-RED.SetX(CANVAS_X); RED.SetY(CANVAS_Y);
-BLOOM = NewSprite(Image("bloom.png").Scale(1800 * S, 1800 * S), 61);
-PlaceC(BLOOM, 960, 300);
-RING = NewSprite(RING_IMG, 24);
-BLACK = NewSprite(Image("pixel-black.png").Scale(CANVAS_W, CANVAS_H), 90);
-BLACK.SetX(CANVAS_X); BLACK.SetY(CANVAS_Y);
+RED = NewSprite(60);
+BLOOM = NewSprite(61);
+RING = NewSprite(24);
+BLACK = NewSprite(90);
+HANDOFF = NewSprite(95);
+
+ANN_OLD = NewSprite(45);
+ANN_NEW = NewSprite(45);
+CAP_IDLE = NewSprite(45);
+CAP_TYPING = NewSprite(45);
+FOOTER = NewSprite(45);
+
+PANEL = NewSprite(50);
+LOCK = NewSprite(51);
+for (gi = 0; gi < 22; gi++) BUL[gi] = NewSprite(52);
+CURSOR = NewSprite(52);
+LABEL = NewSprite(51);
+PLUS = NewSprite(52);
+ENTRY = NewSprite(52);
+CAPS = NewSprite(52);
+MSG = NewSprite(52);
 
 if (IsPlaceholder(SUBVOL, "SUBVOL")) HANDOFF_TEXT = "mounting root";
 else HANDOFF_TEXT = "mounting subvol=" + SUBVOL;
-HANDOFF = TextSprite(HANDOFF_TEXT + "  ·  starting " + SESSION, COL_TEXT, 22, 95);
-PlaceC(HANDOFF, 960, 540);
-
-// ---------------------------------------------------------------- sprites: text
 MODE = Plymouth.GetMode();
 if (MODE == "shutdown" || MODE == "reboot")
   IDLE_CAPTION = "syncing  ·  committing the final transaction";
 else
   IDLE_CAPTION = "btrfs never overwrites a block: changes are written as new copies, then a new root is committed";
 
-ANN_OLD = TextSprite("old root  ·  gen " + GEN + "  ·  still intact", COL_TEXT, 16, 45);
-PlaceR(ANN_OLD, 960 - 85 - 28, 300 + 14);
-ANN_NEW = TextSprite("new root  ·  gen " + (GEN + 1) + "  ·  uncommitted", COL_ACC, 16, 45);
-PlaceL(ANN_NEW, 960 + DX + 85 + 28, 300 + DY);
-CAP_IDLE = TextSprite(IDLE_CAPTION, COL_DIM, 16, 45);
-PlaceC(CAP_IDLE, 960, 170);
-CAP_TYPING = TextSprite("each keystroke copies a leaf and its path up to the root  ·  untouched blocks are shared, never overwritten", COL_DIM, 16, 45);
-PlaceC(CAP_TYPING, 960, 170);
-
-if (!IsPlaceholder(HOST, "HOST")) {
-  FOOTER = TextSprite(HOST + "  ·  linux " + KERNEL, COL_DIM, 15, 45);
-  PlaceC(FOOTER, 960, 1027);
-  FOOTER.SetOpacity(0.8);
+fun ApplyImages() {
+  local.i = 0;
+  while (local.i < NN) {
+    local.k = node[local.i].kind;
+    NS[local.i].base.SetImage(NIMG[local.k]["base"]);
+    NS[local.i].ghost.SetImage(NIMG[local.k]["ghost"]);
+    NS[local.i].acc.SetImage(NIMG[local.k]["acc"]);
+    NS[local.i].white.SetImage(NIMG[local.k]["white"]);
+    NS[local.i].ok.SetImage(NIMG[local.k]["ok"]);
+    NS[local.i].ring.SetImage(NIMG[local.k]["ring"]);
+    NS[local.i].shard.SetImage(NIMG[local.k]["err"]);
+    if (node[local.i].parent >= 0) {
+      local.g = E[local.i].geom;
+      ES[local.i].base.SetImage(EIMG[local.g]["base"]);
+      ES[local.i].ghost.SetImage(EIMG[local.g]["ghost"]);
+      ES[local.i].acc.SetImage(EIMG[local.g]["acc"]);
+      ES[local.i].mixed.SetImage(EIMG[local.g]["mixed"]);
+      ES[local.i].ok.SetImage(EIMG[local.g]["ok"]);
+    }
+    local.i = local.i + 1;
+  }
+  local.i = 0;
+  while (local.i < 4) {
+    local.j = 0;
+    while (local.j < 7) {
+      PULSE_S[local.i][local.j].SetImage(PIMG[local.j]);
+      local.j = local.j + 1;
+    }
+    local.i = local.i + 1;
+  }
+  local.i = 0;
+  while (local.i < DRIFT_N) {
+    DR[local.i].s.SetImage(DIMG[DR[local.i].size]);
+    local.i = local.i + 1;
+  }
+  RING.SetImage(RING_IMG);
+  CURSOR.SetImage(CURSOR_IMG);
+  global.PROMPT_COL = "";            // UpdatePrompt() re-applies panel, lock and bullets
 }
 
-// ---------------------------------------------------------------- sprites: prompt
-PANEL = NewSprite(PANEL_IMG["acc"], 50);
-LOCK = NewSprite(LOCK_IMG["acc"], 51);
-for (gi = 0; gi < 22; gi++) BUL[gi] = NewSprite(BUL_IMG["acc"], 52);
-CURSOR = NewSprite(Img("cursor.png"), 52);
-LABEL = NewSprite(Txt(" ", COL_DIM, 15), 51);
-PLUS = NewSprite(Txt(" ", COL_TEXT, 15), 52);
-ENTRY = NewSprite(Txt(" ", COL_TEXT, 17), 52);
-CAPS = TextSprite("caps lock", COL_AMBER, 14, 52);
-MSG = NewSprite(Txt(" ", COL_TEXT, 17), 52);
+// Text images depend on S (font size).
+fun MakeTexts() {
+  HANDOFF.SetImage(Txt(HANDOFF_TEXT + "  ·  starting " + SESSION, COL_TEXT, 22));
+  ANN_OLD.SetImage(Txt("old root  ·  gen " + GEN + "  ·  still intact", COL_TEXT, 16));
+  ANN_NEW.SetImage(Txt("new root  ·  gen " + (GEN + 1) + "  ·  uncommitted", COL_ACC, 16));
+  CAP_IDLE.SetImage(Txt(IDLE_CAPTION, COL_DIM, 16));
+  CAP_TYPING.SetImage(Txt("each keystroke copies a leaf and its path up to the root  ·  untouched blocks are shared, never overwritten", COL_DIM, 16));
+  if (!IsPlaceholder(HOST, "HOST")) {
+    FOOTER.SetImage(Txt(HOST + "  ·  linux " + KERNEL, COL_DIM, 15));
+    FOOTER.SetOpacity(0.8);
+  }
+  CAPS.SetImage(Txt("caps lock", COL_AMBER, 14));
+  LABEL.SetImage(Txt(PrettyPrompt(PROMPT_TEXT), COL_DIM, 15));
+  ENTRY.SetImage(Txt(ENTRY_TEXT, COL_TEXT, 17));
+  MSG.SetImage(Txt(MSG_SHOWN, MSG_COL, 17));
+  global.PLUS_N = 0;                 // UpdatePrompt() re-renders "+N"
+}
+
+// Everything whose position or size depends on the canvas.
+fun PlaceAll() {
+  local.i = 0;
+  while (local.i < NN) {
+    PlaceC(NS[local.i].base, node[local.i].x, node[local.i].y);
+    PlaceC(NS[local.i].ghost, node[local.i].x, node[local.i].y);
+    if (node[local.i].parent >= 0) {
+      PlaceTL(ES[local.i].base, E[local.i].hx, E[local.i].hy);
+      PlaceTL(ES[local.i].ghost, E[local.i].hx, E[local.i].hy);
+      PlaceTL(ES[local.i].mixed, E[local.i].mx, E[local.i].my);
+    }
+    local.i = local.i + 1;
+  }
+  local.i = 0;
+  while (local.i < DRIFT_N) {
+    global.DR[local.i].y = CANVAS_Y + DR[local.i].fy * CANVAS_H;
+    DR[local.i].s.SetX(CANVAS_X + DR[local.i].fx * CANVAS_W);
+    DR[local.i].s.SetY(DR[local.i].y);
+    local.i = local.i + 1;
+  }
+  VIGNETTE.SetImage(VIGNETTE_SRC.Scale(CANVAS_W, CANVAS_H));
+  VIGNETTE.SetX(CANVAS_X); VIGNETTE.SetY(CANVAS_Y);
+  RED.SetImage(RED_SRC.Scale(CANVAS_W, CANVAS_H));
+  RED.SetX(CANVAS_X); RED.SetY(CANVAS_Y);
+  BLACK.SetImage(BLACK_SRC.Scale(CANVAS_W, CANVAS_H));
+  BLACK.SetX(CANVAS_X); BLACK.SetY(CANVAS_Y);
+  BLOOM.SetImage(BLOOM_SRC.Scale(1800 * S, 1800 * S));
+  PlaceC(BLOOM, 960, 300);
+  PlaceC(HANDOFF, 960, 540);
+  PlaceR(ANN_OLD, 960 - 85 - 28, 300 + 14);
+  PlaceL(ANN_NEW, 960 + DX + 85 + 28, 300 + DY);
+  PlaceC(CAP_IDLE, 960, 170);
+  PlaceC(CAP_TYPING, 960, 170);
+  PlaceC(FOOTER, 960, 1027);
+  PlaceC(MSG, 960, 865);
+}
+
+// Canvas = largest display. Everything is scaled down if any display is
+// smaller than the 1920x1080 design.
+fun Layout() {
+  global.SEEN_W = Window.GetWidth(0);
+  global.SEEN_H = Window.GetHeight(0);
+  local.w = 0;
+  local.h = 0;
+  local.sc = 1;
+  local.i = 0;
+  while (local.i < 8) {
+    local.dw = Window.GetWidth(local.i);
+    local.dh = Window.GetHeight(local.i);
+    if (!local.dw || !local.dh) break;
+    local.w = Math.Max(local.w, local.dw);
+    local.h = Math.Max(local.h, local.dh);
+    local.sc = Math.Min(local.sc, Math.Min(local.dw / 1920, local.dh / 1080));
+    local.i = local.i + 1;
+  }
+  if (local.w > 0) {
+    global.CANVAS_W = local.w;
+    global.CANVAS_H = local.h;
+    global.CANVAS_X = Window.GetX();
+    global.CANVAS_Y = Window.GetY();
+    if (!CANVAS_X) global.CANVAS_X = 0;
+    if (!CANVAS_Y) global.CANVAS_Y = 0;
+    global.CX = CANVAS_X + CANVAS_W / 2;
+    global.CY = CANVAS_Y + CANVAS_H / 2;
+    if (local.sc != S) {
+      global.S = local.sc;
+      LoadImages();
+      ApplyImages();
+      MakeTexts();
+    }
+    PlaceAll();
+  }
+}
+
+fun OnHotplug() {
+  Layout();
+}
 
 // ---------------------------------------------------------------- state
 T = 0;
@@ -316,6 +466,9 @@ FLASH_T = NEVER;
 MSG_TEXT = "";
 MSG_ERR = 0;
 MSG_T = NEVER;
+MSG_SHOWN = " ";        // what MSG currently renders, for re-rendering after Layout()
+MSG_COL = COL_TEXT;
+ENTRY_TEXT = " ";
 BREATH = 1;
 SLIDE = 0;
 OKMIX = 0;
@@ -388,8 +541,10 @@ fun SetMessage(text, col) {
   global.MSG_TEXT = text;
   global.MSG_ERR = (col.r == COL_ERR.r && col.g == COL_ERR.g);
   global.MSG_T = T;
-  if (text == "") MSG.SetImage(Txt(" ", col, 17));
-  else MSG.SetImage(Txt(text, col, 17));
+  global.MSG_COL = col;
+  global.MSG_SHOWN = text;
+  if (text == "") global.MSG_SHOWN = " ";
+  MSG.SetImage(Txt(MSG_SHOWN, col, 17));
   PlaceC(MSG, 960, 865);
 }
 
@@ -430,17 +585,34 @@ fun ResetTree() {
   SetMessage("", COL_TEXT);
 }
 
-// "Please enter passphrase for disk X (luks-...):" -> "passphrase for disk X (luks-...)"
+// "Please enter passphrase for disk X (luks-...):" -> "passphrase for <DISK entry>",
+// or "passphrase for disk X (luks-...)" for a volume we have no name for.
 fun PrettyPrompt(p) {
-  if (!p) return " ";
+  if (!p || p == "") return " ";
   local.s = String(p);
   local.len = local.s.Length();
   if (local.s.SubString(0, 13) == "Please enter ") {
     local.s = String(local.s.SubString(13, local.len));
     local.len = local.len - 13;
   }
-  if (local.len > 1 && local.s.SubString(local.len - 1, local.len) == ":")
+  if (local.len > 1 && local.s.SubString(local.len - 1, local.len) == ":") {
     local.s = String(local.s.SubString(0, local.len - 1));
+    local.len = local.len - 1;
+  }
+  // volume name = text inside the last "(...)"
+  local.open = -1;
+  local.close = -1;
+  local.i = local.len - 1;
+  while (local.i >= 0 && local.open < 0) {
+    local.ch = local.s.CharAt(local.i);
+    if (local.ch == ")" && local.close < 0) local.close = local.i;
+    if (local.ch == "(" && local.close >= 0) local.open = local.i;
+    local.i = local.i - 1;
+  }
+  if (local.open >= 0) {
+    local.vol = local.s.SubString(local.open + 1, local.close);
+    if (DISK[local.vol]) return "passphrase for " + DISK[local.vol];
+  }
   return local.s;
 }
 
@@ -448,8 +620,6 @@ fun ShowPrompt(prompt, kind) {
   global.PROMPT_TEXT = prompt;
   global.PROMPT_KIND = kind;
   global.PROMPT_VISIBLE = 1;
-  LABEL.SetImage(Txt(" ", COL_DIM, 15));
-  // Anything below can fail on odd prompt text without breaking input.
   LABEL.SetImage(Txt(PrettyPrompt(prompt), COL_DIM, 15));
 }
 
@@ -474,8 +644,9 @@ fun OnPassword(prompt, bullets) {
 
 fun OnQuestion(prompt, entry) {
   if (!PROMPT_VISIBLE || PROMPT_KIND != "question" || prompt != PROMPT_TEXT) ShowPrompt(prompt, "question");
-  if (!entry) entry = " ";
-  ENTRY.SetImage(Txt(entry, COL_TEXT, 17));
+  global.ENTRY_TEXT = entry;
+  if (!entry) global.ENTRY_TEXT = " ";
+  ENTRY.SetImage(Txt(ENTRY_TEXT, COL_TEXT, 17));
 }
 
 // The entry was answered (Enter). For a passphrase, cryptsetup now checks it.
@@ -504,7 +675,7 @@ fun OnHideMessage(text) {
 fun UpdateDrift() {
   local.i = 0;
   while (local.i < DRIFT_N) {
-    global.DR[local.i].y = DR[local.i].y - DR[local.i].v * FRAME_MS;
+    global.DR[local.i].y = DR[local.i].y - DR[local.i].v * S * FRAME_MS;
     if (DR[local.i].y < CANVAS_Y - 20) {
       global.DR[local.i].y = CANVAS_Y + CANVAS_H + 20;
       DR[local.i].s.SetX(CANVAS_X + Math.Random() * CANVAS_W);
@@ -753,6 +924,8 @@ fun UpdateOverlays() {
 
 fun Refresh() {
   global.T = T + FRAME_MS;
+  // Belt and braces next to the hotplug callback: catch display changes here too.
+  if (Window.GetWidth(0) != SEEN_W || Window.GetHeight(0) != SEEN_H) Layout();
 
   if (PHASE == "check" && T - PHASE_T > 8000) Commit();   // root_mounted never came
   if (PHASE == "abort" && T - PHASE_T > 700) global.PHASE = "input";
@@ -782,14 +955,16 @@ fun Refresh() {
     local.i = local.i + 1;
   }
 
-  UpdateDrift();
-  UpdateEdges();
-  UpdateTree();
-  UpdatePulses();
-  UpdateShards();
-  UpdateAnnotations();
-  UpdatePrompt();
-  UpdateOverlays();
+  if (S > 0) {
+    UpdateDrift();
+    UpdateEdges();
+    UpdateTree();
+    UpdatePulses();
+    UpdateShards();
+    UpdateAnnotations();
+    UpdatePrompt();
+    UpdateOverlays();
+  }
 }
 
 Plymouth.SetRefreshFunction(Refresh);
@@ -799,3 +974,8 @@ Plymouth.SetDisplayNormalFunction(OnNormal);
 Plymouth.SetRootMountedFunction(OnRootMounted);
 Plymouth.SetDisplayMessageFunction(OnMessage);
 Plymouth.SetHideMessageFunction(OnHideMessage);
+// Last, so an older Plymouth without it still has everything above.
+Plymouth.SetDisplayHotplugFunction(OnHotplug);
+
+// After the callbacks, so a failure while drawing can't stop the prompt working.
+Layout();

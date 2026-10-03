@@ -51,7 +51,10 @@ def write_theme(dest, name, assets, values=None):
         (dest / fname).write_bytes(data)
     script = (ROOT / "theme/btrfs-cow.script").read_text()
     for key, val in (values or {}).items():
-        script = script.replace(f"@{key}@", val)
+        if key == "DISKS":
+            script = script.replace("// @DISKS@\n", val)
+        else:
+            script = script.replace(f"@{key}@", val)
     (dest / f"{name}.script").write_text(script)
     plymouth = (ROOT / "theme/btrfs-cow.plymouth").read_text()
     plymouth = plymouth.replace("@NAME@", name).replace("@DIR@", str(THEMES / name))
@@ -61,7 +64,22 @@ def write_theme(dest, name, assets, values=None):
 def machine_values():
     host = Path("/etc/hostname").read_text().strip() if Path("/etc/hostname").exists() else os.uname().nodename
     m = re.search(r"rootflags=\S*?subvol=([^\s,]+)", Path("/proc/cmdline").read_text())
-    return {"HOST": host, "KERNEL": os.uname().release, "SUBVOL": m.group(1) if m else "/"}
+    return {"HOST": host, "KERNEL": os.uname().release, "SUBVOL": m.group(1) if m else "/",
+            "DISKS": disk_lines()}
+
+
+def disk_lines():
+    """Same DISK[...] lines the btrfs-cow-theme hook writes into the initramfs."""
+    out = subprocess.run(["lsblk", "-rno", "NAME,FSTYPE,UUID,PKNAME"], capture_output=True, text=True).stdout
+    lines = []
+    for row in out.splitlines():
+        f = row.split()
+        if len(f) == 4 and f[1] == "crypto_LUKS":
+            model = subprocess.run(["lsblk", "-dno", "MODEL", f"/dev/{f[3]}"],
+                                   capture_output=True, text=True).stdout.strip().replace('"', "")
+            name = f[0] + (f"  ·  {model}" if model else "")
+            lines.append(f'DISK["luks-{f[2]}"] = "{name}";\n')
+    return "".join(lines)
 
 
 def main():
