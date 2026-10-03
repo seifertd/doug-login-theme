@@ -1,0 +1,181 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>btrfs-cow asset generator</title>
+<!--
+  Renders every image the Plymouth theme uses, with the same drawing code as
+  mockup/index.html. tools/build.py loads this in headless Chrome and reads
+  the PNGs (as data URLs) back out of the #out element.
+
+  Geometry here must match the layout constants at the top of
+  theme/btrfs-cow.script (node sizes, NODE_PAD, EDGE_PAD, DX/DY, edge deltas).
+-->
+<body><pre id="out"></pre>
+<script>
+const params = new URLSearchParams(location.search);
+const ACC = params.get("accent") || "#5ef2b8";
+const GEN = +(params.get("gen") || 4127);
+const C = {
+  node: "#141b27", stroke: "#3a4860", ghost: "#334058",
+  ok: "#7ee787", err: "#ff5c6c", white: "#ffffff",
+  panel: "rgba(14,19,28,0.92)",
+  bg0: "#0d121b", bg1: "#06080c",
+};
+const FONT = '"JetBrainsMono Nerd Font Mono", "JetBrains Mono", monospace';
+const KINDS = { root: [170, 64], inner: [128, 52], leaf: [88, 44] };
+const NODE_PAD = 32, EDGE_PAD = 16, DX = 20, DY = -20;
+// child.x - parent.x for each edge shape; vertical gap is the same for both levels
+const EDGES = { "ri-l": -420, "ri-m": 0, "ri-r": 420, "il-l": -140, "il-m": 0, "il-r": 140 };
+const EDGE_DY = 92;
+
+const out = {};
+function make(name, w, h, draw) {
+  const c = document.createElement("canvas");
+  c.width = Math.ceil(w); c.height = Math.ceil(h);
+  const ctx = c.getContext("2d");
+  draw(ctx, c.width, c.height);
+  out[name + ".png"] = c.toDataURL("image/png");
+}
+function rgba(hex, a) {
+  const n = parseInt(hex.slice(1), 16);
+  return `rgba(${n >> 16 & 255},${n >> 8 & 255},${n & 255},${a})`;
+}
+function mixHex(h1, h2, k) {
+  const a = parseInt(h1.slice(1), 16), b = parseInt(h2.slice(1), 16);
+  const ch = s => Math.round((a >> s & 255) + ((b >> s & 255) - (a >> s & 255)) * k);
+  return "#" + ((1 << 24) | (ch(16) << 16) | (ch(8) << 8) | ch(0)).toString(16).slice(1);
+}
+function rr(ctx, x, y, w, h, r) { ctx.beginPath(); ctx.roundRect(x, y, w, h, r); }
+
+// ---------------------------------------------------------------- nodes
+function drawNode(ctx, kind, cx, cy, style, col, gen) {
+  const [w, h] = KINDS[kind];
+  const x = cx - w / 2, y = cy - h / 2;
+  if (style === "ghost") {
+    ctx.setLineDash([6, 6]); ctx.strokeStyle = C.ghost; ctx.lineWidth = 1.5;
+    rr(ctx, x, y, w, h, 9); ctx.stroke(); ctx.setLineDash([]);
+    return;
+  }
+  const lit = style === "copy";
+  if (lit) { ctx.shadowColor = col; ctx.shadowBlur = 22; }
+  ctx.fillStyle = lit ? mixHex(C.node, col, 0.16) : C.node;
+  rr(ctx, x, y, w, h, 9); ctx.fill();
+  ctx.shadowBlur = 0;
+  ctx.strokeStyle = lit ? col : C.stroke; ctx.lineWidth = lit ? 2 : 1.5; ctx.stroke();
+
+  ctx.fillStyle = lit ? col : "#4c5870";
+  if (kind === "root") {
+    ctx.textAlign = "center"; ctx.textBaseline = "middle";
+    ctx.font = `600 20px ${FONT}`;
+    ctx.fillText("ROOT", cx, cy - 10);
+    ctx.font = `15px ${FONT}`;
+    ctx.fillStyle = lit ? col : "#8a97ad";
+    ctx.fillText("gen " + gen, cx, cy + 13);
+  } else {
+    const k = kind === "inner" ? 4 : 3, gap = 6, bw = (w - 24 - gap * (k - 1)) / k;
+    ctx.globalAlpha = lit ? 0.9 : 0.55;
+    for (let i = 0; i < k; i++) { rr(ctx, x + 12 + i * (bw + gap), cy - 6, bw, 12, 3); ctx.fill(); }
+    ctx.globalAlpha = 1;
+  }
+}
+
+for (const [kind, [w, h]] of Object.entries(KINDS)) {
+  const iw = w + 2 * NODE_PAD, ih = h + 2 * NODE_PAD;
+  make(`node-${kind}-base`, iw, ih, ctx => drawNode(ctx, kind, iw / 2, ih / 2, "base", null, GEN));
+  make(`node-${kind}-ghost`, iw, ih, ctx => drawNode(ctx, kind, iw / 2, ih / 2, "ghost", null, GEN));
+  make(`node-${kind}-acc`, iw, ih, ctx => drawNode(ctx, kind, iw / 2, ih / 2, "copy", ACC, GEN + 1));
+  make(`node-${kind}-white`, iw, ih, ctx => drawNode(ctx, kind, iw / 2, ih / 2, "copy", C.white, GEN + 1));
+  make(`node-${kind}-ok`, iw, ih, ctx => drawNode(ctx, kind, iw / 2, ih / 2, "copy", C.ok, GEN + 1));
+  // Square, so Plymouth's same-size Image.Rotate doesn't clip the corners.
+  const sq = Math.max(w, h) + 2 * NODE_PAD;
+  make(`node-${kind}-err`, sq, sq, ctx => drawNode(ctx, kind, sq / 2, sq / 2, "copy", C.err, GEN + 1));
+  // "already copied, rewritten in place" ring
+  make(`node-${kind}-ring`, w + 32, h + 32, ctx => {
+    ctx.strokeStyle = ACC; ctx.lineWidth = 2;
+    rr(ctx, 8, 8, w + 16, h + 16, 12); ctx.stroke();
+  });
+}
+// Commit ring around the new root; the script scales it up as it fades.
+{
+  const [w, h] = KINDS.root, p = 36;
+  make("commit-ring", w + 2 * p, h + 2 * p, ctx => {
+    ctx.strokeStyle = C.white; ctx.lineWidth = 3; ctx.shadowColor = C.white; ctx.shadowBlur = 30;
+    rr(ctx, p, p, w, h, 14); ctx.stroke();
+  });
+}
+
+// ---------------------------------------------------------------- edges
+// Image top-left sits at (min(x1, x2) - EDGE_PAD, y1 - EDGE_PAD) in layout coords.
+function edgeImage(name, dx, dy, style, col) {
+  const w = Math.abs(dx) + 2 * EDGE_PAD, h = dy + 2 * EDGE_PAD;
+  make(name, w, h, ctx => {
+    const x1 = (dx < 0 ? -dx : 0) + EDGE_PAD, y1 = EDGE_PAD, x2 = x1 + dx, y2 = y1 + dy, my = (y1 + y2) / 2;
+    ctx.beginPath(); ctx.moveTo(x1, y1); ctx.bezierCurveTo(x1, my, x2, my, x2, y2);
+    if (style === "ghost") { ctx.setLineDash([5, 6]); ctx.strokeStyle = C.ghost; ctx.lineWidth = 1.2; }
+    else if (style === "copy") { ctx.strokeStyle = col; ctx.lineWidth = 2; ctx.shadowColor = col; ctx.shadowBlur = 10; }
+    else { ctx.strokeStyle = C.stroke; ctx.lineWidth = 1.4; }
+    ctx.stroke();
+  });
+}
+for (const [geom, dx] of Object.entries(EDGES)) {
+  edgeImage(`edge-${geom}-base`, dx, EDGE_DY, "base");
+  edgeImage(`edge-${geom}-ghost`, dx, EDGE_DY, "ghost");
+  edgeImage(`edge-${geom}-acc`, dx, EDGE_DY, "copy", ACC);
+  edgeImage(`edge-${geom}-ok`, dx, EDGE_DY, "copy", C.ok);
+  // copied parent (offset by DX, DY) pointing at the untouched original child
+  edgeImage(`edge-${geom}-mixed`, dx - DX, EDGE_DY - DY, "copy", ACC);
+}
+
+// ---------------------------------------------------------------- pulse
+make("pulse-0", 52, 52, ctx => {
+  ctx.fillStyle = C.white; ctx.shadowColor = ACC; ctx.shadowBlur = 16;
+  ctx.beginPath(); ctx.arc(26, 26, 6, 0, Math.PI * 2); ctx.fill();
+});
+for (let k = 1; k < 7; k++) {
+  make(`pulse-${k}`, 52, 52, ctx => {
+    ctx.globalAlpha = 1 - k / 7;
+    ctx.fillStyle = ACC; ctx.shadowColor = ACC; ctx.shadowBlur = 16;
+    ctx.beginPath(); ctx.arc(26, 26, 6 - k * 0.6, 0, Math.PI * 2); ctx.fill();
+  });
+}
+
+// ---------------------------------------------------------------- prompt
+for (const [name, col] of [["acc", ACC], ["err", C.err], ["ok", C.ok]]) {
+  make(`panel-${name}`, 644, 82, ctx => {
+    rr(ctx, 2, 2, 640, 78, 14);
+    ctx.fillStyle = C.panel; ctx.fill();
+    ctx.strokeStyle = rgba(col, 0.55); ctx.lineWidth = 1.5; ctx.stroke();
+  });
+  // image centre = (padlock centre x, panel centre y)
+  make(`lock-${name}`, 60, 60, ctx => {
+    const lx = 30, ly = 34;
+    ctx.strokeStyle = col; ctx.lineWidth = 3;
+    ctx.beginPath(); ctx.arc(lx, ly - 10, 9, Math.PI, 0); ctx.lineTo(lx + 9, ly - 4);
+    ctx.moveTo(lx - 9, ly - 10); ctx.lineTo(lx - 9, ly - 4); ctx.stroke();
+    ctx.fillStyle = col; rr(ctx, lx - 14, ly - 4, 28, 20, 4); ctx.fill();
+  });
+  make(`bullet-${name}`, 40, 40, ctx => {
+    ctx.fillStyle = col; ctx.shadowColor = col; ctx.shadowBlur = 8;
+    rr(ctx, 12, 12, 16, 16, 3); ctx.fill();
+  });
+}
+make("cursor", 3, 26, ctx => { ctx.fillStyle = rgba(ACC, 0.7); ctx.fillRect(0, 0, 3, 26); });
+
+// ---------------------------------------------------------------- background & overlays
+for (const s of [4, 7, 10, 13]) make(`drift-${s}`, s, s, ctx => { ctx.fillStyle = ACC; ctx.fillRect(0, 0, s, s); });
+// Small; the script scales these up to the canvas. Gradients survive that fine.
+make("vignette", 480, 270, ctx => {
+  const g = ctx.createRadialGradient(240, 113, 20, 240, 135, 336);
+  g.addColorStop(0, C.bg0); g.addColorStop(1, C.bg1);
+  ctx.fillStyle = g; ctx.fillRect(0, 0, 480, 270);
+});
+make("bloom", 450, 450, ctx => {
+  const g = ctx.createRadialGradient(225, 225, 0, 225, 225, 225);
+  g.addColorStop(0, "rgba(255,255,255,1)"); g.addColorStop(1, "rgba(255,255,255,0)");
+  ctx.fillStyle = g; ctx.fillRect(0, 0, 450, 450);
+});
+make("pixel-red", 4, 4, ctx => { ctx.fillStyle = C.err; ctx.fillRect(0, 0, 4, 4); });
+make("pixel-black", 4, 4, ctx => { ctx.fillStyle = "#000"; ctx.fillRect(0, 0, 4, 4); });
+
+document.getElementById("out").textContent = JSON.stringify(out);
+</script>
+</body>

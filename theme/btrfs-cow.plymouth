@@ -1,0 +1,10 @@
+[Plymouth Theme]
+Name=@NAME@
+Description=btrfs copy-on-write LUKS unlock: every keystroke copies a path to a new root
+ModuleName=script
+
+[script]
+ImageDir=@DIR@
+ScriptFile=@DIR@/@NAME@.script
+Font=JetBrainsMono Nerd Font Mono
+MonospaceFont=JetBrainsMono Nerd Font Mono

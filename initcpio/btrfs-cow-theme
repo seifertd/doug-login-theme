@@ -1,0 +1,28 @@
+#!/bin/bash
+# mkinitcpio install hook: fills in the btrfs-cow Plymouth theme's per-image
+# values (hostname, kernel version, root subvolume) inside the initramfs.
+# Must run after the plymouth hook, which copies the theme in; the drop-in
+# 20-btrfs-cow-theme.conf appends it to HOOKS for that reason.
+
+build() {
+    local theme script host subvol
+    theme=$(plymouth-set-default-theme)
+    [[ $theme == btrfs-cow ]] || return 0
+    script="/usr/share/plymouth/themes/$theme/$theme.script"
+    [[ -f $script ]] || return 0
+
+    host=$(cat /etc/hostname 2>/dev/null) || host=$(uname -n)
+    subvol=$(sed -n 's/.*rootflags=[^ ]*subvol=\([^ ,]*\).*/\1/p' /proc/cmdline)
+
+    sed -e "s|@HOST@|${host}|g" \
+        -e "s|@KERNEL@|${KERNELVERSION}|g" \
+        -e "s|@SUBVOL@|${subvol:-/}|g" \
+        "$script" | add_file - "$script" 644
+}
+
+help() {
+    cat <<HELPEOF
+Fills in hostname, kernel version and root subvolume for the btrfs-cow
+Plymouth theme. Does nothing unless btrfs-cow is the default theme.
+HELPEOF
+}

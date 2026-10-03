@@ -1,0 +1,543 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>btrfs CoW unlock — mockup</title>
+<style>
+  :root {
+    --bg: #05070b;
+    --panel: #0f141d;
+    --line: #232c3b;
+    --text: #c9d3e3;
+    --muted: #6f7c92;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 14px/1.4 ui-monospace, "JetBrains Mono", "Fira Code", monospace;
+    display: flex; flex-direction: column; align-items: center; gap: 14px;
+    padding: 16px;
+  }
+  #stage {
+    width: min(100%, calc((100vh - 140px) * 16 / 9)); aspect-ratio: 16 / 9;
+    border: 1px solid var(--line); border-radius: 6px; overflow: hidden;
+    outline: none;
+  }
+  canvas { display: block; width: 100%; height: 100%; }
+  #controls {
+    display: flex; flex-wrap: wrap; gap: 18px 26px; align-items: center;
+    background: var(--panel); border: 1px solid var(--line); border-radius: 6px;
+    padding: 10px 16px; max-width: 100%;
+  }
+  #controls label { display: flex; align-items: center; gap: 8px; color: var(--muted); }
+  #controls input[type=text] {
+    width: 9em; background: #070a0f; color: var(--text); border: 1px solid var(--line);
+    border-radius: 4px; padding: 3px 6px; font: inherit;
+  }
+  .swatch {
+    width: 18px; height: 18px; border-radius: 4px; border: 2px solid transparent; cursor: pointer; padding: 0;
+  }
+  .swatch.on { border-color: #fff; }
+  button.reset {
+    background: #172030; color: var(--text); border: 1px solid var(--line); border-radius: 4px;
+    padding: 4px 10px; font: inherit; cursor: pointer;
+  }
+  .hint { color: var(--muted); }
+</style>
+</head>
+<body>
+<div id="stage" tabindex="0"><canvas id="c"></canvas></div>
+<div id="controls">
+  <span class="hint">type to enter the passphrase · Enter to unlock · Backspace · Esc resets</span>
+  <label>passphrase <input type="text" id="pw" value="btrfs" spellcheck="false"></label>
+  <label>speed <input type="range" id="speed" min="0.4" max="2" step="0.1" value="0.7"> <span id="speedv">0.7×</span></label>
+  <label>accent <span id="swatches"></span></label>
+  <label><input type="checkbox" id="labels" checked> annotations</label>
+  <button class="reset" id="reset">reset</button>
+</div>
+
+<script>
+// Logical canvas matches the Plymouth canvas on the laptop panel. Everything
+// drawn is a "sprite": a pre-shaped thing placed at x/y with an opacity, so
+// it can be ported to Plymouth's Sprite/Image API (edges become small PNGs).
+const W = 1920, H = 1080;
+const DX = 20, DY = -20;               // offset of a CoW copy from its original
+const HOST = "my-hostname", KERNEL = "7.2.8-2-cachyos", DEV = "nvme0n1p2";
+
+const C = {
+  bg0: "#0d121b", bg1: "#06080c",
+  node: "#141b27", stroke: "#3a4860", ghost: "#334058",
+  text: "#8a97ad", dim: "#4c5870",
+  ok: "#7ee787", err: "#ff5c6c",
+};
+const ACCENTS = ["#5ef2b8", "#5ec8f2", "#f2b35e", "#b18cff"];   // first is the default
+const cfg = { speed: 0.7, accent: ACCENTS[0], labels: true };
+
+// ---------------------------------------------------------------- tree
+const nodes = [];
+function addNode(kind, x, y, w, h, parent) {
+  const n = { id: nodes.length, kind, x, y, w, h, parent, children: [] };
+  if (parent != null) nodes[parent].children.push(n.id);
+  nodes.push(n);
+  return n.id;
+}
+const ROOT = addNode("root", 960, 300, 170, 64, null);
+const leaves = [];
+for (const ix of [540, 960, 1380]) {
+  const inner = addNode("inner", ix, 450, 128, 52, ROOT);
+  for (const o of [-140, 0, 140]) leaves.push(addNode("leaf", ix + o, 590, 88, 44, inner));
+}
+// Scatter keystrokes across the tree rather than filling left to right.
+const LEAF_ORDER = [4, 0, 7, 2, 8, 1, 5, 3, 6].map(i => leaves[i]);
+
+// ---------------------------------------------------------------- state
+let st, typed = "";
+function reset(gen) {
+  typed = "";
+  st = {
+    phase: "input",          // input | check | abort | commit | done
+    chars: 0,
+    stack: [],               // one entry per keystroke: { created: [node ids] }
+    cow: new Map(),          // node id -> { born, removing, touch }
+    pulses: [],
+    dying: [],
+    gen: gen ?? 4127,
+    attempt: 1,
+    msg: "", msgColor: C.text, msgT: 0,
+    t0: 0,                   // start of current phase
+    shakeT: -1e9, flashT: -1e9,
+  };
+}
+reset();
+
+const drift = Array.from({ length: 46 }, () => ({
+  x: Math.random() * W, y: Math.random() * H,
+  s: 4 + Math.random() * 10, v: 0.004 + Math.random() * 0.012, a: 0.03 + Math.random() * 0.07,
+}));
+
+// ---------------------------------------------------------------- helpers
+const clamp = (v, a = 0, b = 1) => Math.max(a, Math.min(b, v));
+const ease = k => 1 - Math.pow(1 - k, 3);
+const lerp = (a, b, k) => a + (b - a) * k;
+const seg = () => 150 / cfg.speed;
+const appear = () => 200 / cfg.speed;
+function rgba(hex, a) {
+  const n = parseInt(hex.slice(1), 16);
+  return `rgba(${n >> 16 & 255},${n >> 8 & 255},${n & 255},${a})`;
+}
+function mixHex(h1, h2, k) {
+  const a = parseInt(h1.slice(1), 16), b = parseInt(h2.slice(1), 16);
+  const ch = s => Math.round(lerp(a >> s & 255, b >> s & 255, k));
+  return "#" + ((1 << 24) | (ch(16) << 16) | (ch(8) << 8) | ch(0)).toString(16).slice(1);
+}
+function pathToRoot(id) {
+  const p = [];
+  for (let n = id; n != null; n = nodes[n].parent) p.push(n);
+  return p;
+}
+function cowAlpha(id, t) {
+  const e = st.cow.get(id);
+  if (!e) return 0;
+  let a = clamp((t - e.born) / appear());
+  if (e.removing != null) a *= 1 - clamp((t - e.removing) / 220);
+  return a;
+}
+// Where a node's copy sits; during commit the copies slide home.
+function copyPos(n, t) {
+  let k = 0;
+  if (st.phase === "commit" || st.phase === "done") k = ease(clamp((t - st.t0 - 350) / 650));
+  return [n.x + DX * (1 - k), n.y + DY * (1 - k)];
+}
+function say(msg, color, t) { st.msg = msg; st.msgColor = color; st.msgT = t; }
+
+// ---------------------------------------------------------------- input
+function keystroke(t) {
+  const leaf = LEAF_ORDER[st.chars % LEAF_ORDER.length];
+  st.chars++;
+  const path = pathToRoot(leaf);
+  const created = [];
+  path.forEach((id, k) => {
+    const when = t + k * seg();
+    const e = st.cow.get(id);
+    if (!e || e.removing != null) {
+      st.cow.set(id, { born: when, removing: null, touch: when });
+      created.push(id);
+    } else {
+      // Already copied in this transaction: btrfs rewrites it in place.
+      e.touch = when;
+    }
+  });
+  st.pulses.push({ path, t0: t });
+  st.stack.push({ created });
+  if (st.msg && st.msgColor !== C.err) st.msg = "";
+}
+function backspace(t) {
+  const entry = st.stack.pop();
+  if (!entry) return;
+  st.chars--;
+  for (const id of entry.created) st.cow.get(id).removing = t;
+}
+function submit(t) {
+  if (st.chars === 0) return;
+  st.phase = "check"; st.t0 = t;
+  st.ok = typed === document.getElementById("pw").value;
+  say("unlocking " + DEV + " …", C.text, t);
+}
+function abort(t) {
+  for (const [id, e] of st.cow) {
+    if (cowAlpha(id, t) <= 0) continue;
+    const [x, y] = copyPos(nodes[id], t);
+    st.dying.push({ id, x, y, vx: (Math.random() - 0.5) * 0.25, vy: -0.15 - Math.random() * 0.2,
+                    vr: (Math.random() - 0.5) * 0.004, t0: t });
+  }
+  st.cow.clear(); st.stack = []; st.chars = 0; typed = "";
+  st.phase = "abort"; st.t0 = t; st.shakeT = t; st.flashT = t;
+  st.attempt++;
+  say(`transaction aborted · generation ${st.gen} unchanged · attempt ${st.attempt}`, C.err, t);
+}
+function commit(t) {
+  st.phase = "commit"; st.t0 = t;
+  say(`transaction committed · generation ${st.gen + 1}`, C.ok, t);
+}
+
+window.addEventListener("keydown", ev => {
+  if (ev.target.tagName === "INPUT") return;
+  if (ev.ctrlKey || ev.metaKey || ev.altKey) return;
+  const t = performance.now();
+  if (st.phase === "done") { reset(st.gen); ev.preventDefault(); return; }
+  if (ev.key === "Escape") { reset(st.gen); ev.preventDefault(); return; }
+  if (st.phase !== "input") return;
+  if (ev.key === "Backspace") { typed = typed.slice(0, -1); backspace(t); }
+  else if (ev.key === "Enter") submit(t);
+  else if (ev.key.length === 1) { typed += ev.key; keystroke(t); }
+  else return;
+  ev.preventDefault();
+});
+
+// ---------------------------------------------------------------- drawing
+const canvas = document.getElementById("c");
+const ctx = canvas.getContext("2d");
+function resize() {
+  const r = canvas.getBoundingClientRect(), dpr = window.devicePixelRatio || 1;
+  canvas.width = Math.round(r.width * dpr); canvas.height = Math.round(r.height * dpr);
+  ctx.setTransform(canvas.width / W, 0, 0, canvas.height / H, 0, 0);
+}
+new ResizeObserver(resize).observe(canvas);
+
+function rr(x, y, w, h, r) { ctx.beginPath(); ctx.roundRect(x, y, w, h, r); }
+
+function drawNode(n, cx, cy, style, alpha, col, gen) {
+  if (alpha <= 0.01) return;
+  ctx.save();
+  ctx.globalAlpha = alpha;
+  const x = cx - n.w / 2, y = cy - n.h / 2;
+  if (style === "ghost") {
+    ctx.setLineDash([6, 6]); ctx.strokeStyle = C.ghost; ctx.lineWidth = 1.5;
+    rr(x, y, n.w, n.h, 9); ctx.stroke();
+    ctx.restore(); return;
+  }
+  const lit = style === "copy";
+  const stroke = lit ? col : C.stroke;
+  if (lit) { ctx.shadowColor = col; ctx.shadowBlur = 22; }
+  ctx.fillStyle = lit ? mixHex(C.node, col, 0.16) : C.node;
+  rr(x, y, n.w, n.h, 9); ctx.fill();
+  ctx.shadowBlur = 0;
+  ctx.strokeStyle = stroke; ctx.lineWidth = lit ? 2 : 1.5; ctx.stroke();
+
+  ctx.fillStyle = lit ? col : C.dim;
+  if (n.kind === "root") {
+    ctx.font = "600 20px ui-monospace, monospace"; ctx.textAlign = "center"; ctx.textBaseline = "middle";
+    ctx.fillText("ROOT", cx, cy - 10);
+    ctx.font = "15px ui-monospace, monospace";
+    ctx.fillStyle = lit ? col : C.text;
+    ctx.fillText("gen " + gen, cx, cy + 13);
+  } else {
+    // key slots / items inside the block
+    const k = n.kind === "inner" ? 4 : 3, gap = 6, bw = (n.w - 24 - gap * (k - 1)) / k;
+    for (let i = 0; i < k; i++) {
+      rr(x + 12 + i * (bw + gap), cy - 6, bw, 12, 3);
+      ctx.globalAlpha = alpha * (lit ? 0.9 : 0.55); ctx.fill();
+    }
+  }
+  ctx.restore();
+}
+
+function drawEdge(x1, y1, x2, y2, style, alpha, col) {
+  if (alpha <= 0.01) return;
+  ctx.save();
+  ctx.globalAlpha = alpha;
+  const my = (y1 + y2) / 2;
+  ctx.beginPath(); ctx.moveTo(x1, y1); ctx.bezierCurveTo(x1, my, x2, my, x2, y2);
+  if (style === "ghost") { ctx.setLineDash([5, 6]); ctx.strokeStyle = C.ghost; ctx.lineWidth = 1.2; }
+  else if (style === "copy") { ctx.strokeStyle = col; ctx.lineWidth = 2; ctx.shadowColor = col; ctx.shadowBlur = 10; }
+  else { ctx.strokeStyle = C.stroke; ctx.lineWidth = 1.4; }
+  ctx.stroke();
+  ctx.restore();
+}
+
+function copyColor(t) {
+  if (st.phase === "commit" || st.phase === "done") {
+    // Flash to white, then settle on the success green: with a green accent,
+    // accent -> ok alone is too subtle to read as "it worked".
+    const e = t - st.t0;
+    return e < 110 ? mixHex(cfg.accent, "#ffffff", e / 110) : mixHex("#ffffff", C.ok, clamp((e - 110) / 450));
+  }
+  if (st.phase === "check") return mixHex(cfg.accent, "#ffffff", 0.25 + 0.25 * Math.sin((t - st.t0) / 90));
+  return cfg.accent;
+}
+
+function render(t, dt) {
+  const col = copyColor(t);
+  const committing = st.phase === "commit" || st.phase === "done";
+  const slideK = committing ? ease(clamp((t - st.t0 - 350) / 650)) : 0;
+
+  // background
+  const g = ctx.createRadialGradient(W / 2, H * 0.42, 80, W / 2, H / 2, W * 0.7);
+  g.addColorStop(0, C.bg0); g.addColorStop(1, C.bg1);
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+
+  // free-space blocks drifting upward
+  for (const d of drift) {
+    d.y -= d.v * dt; if (d.y < -20) { d.y = H + 20; d.x = Math.random() * W; }
+    ctx.fillStyle = rgba(cfg.accent, d.a);
+    ctx.fillRect(d.x, d.y, d.s, d.s);
+  }
+
+  const breath = 0.78 + 0.12 * Math.sin(t / 1800 * Math.PI * 2);
+
+  // edges
+  for (const n of nodes) {
+    if (n.parent == null) continue;
+    const p = nodes[n.parent];
+    const pa = cowAlpha(p.id, t), ca = cowAlpha(n.id, t);
+    const oldA = breath * (1 - pa * (1 - slideK));
+    drawEdge(p.x, p.y + p.h / 2, n.x, n.y - n.h / 2, "base", oldA, col);
+    drawEdge(p.x, p.y + p.h / 2, n.x, n.y - n.h / 2, "ghost", pa * (1 - slideK), col);
+    if (pa > 0) {
+      // The new parent points at the child's copy if there is one,
+      // otherwise at the unchanged original: that sharing is the whole trick.
+      const [px, py] = copyPos(p, t);
+      const [cx, cy] = ca > 0 ? copyPos(n, t) : [n.x, n.y];
+      drawEdge(px, py + p.h / 2, cx, cy - n.h / 2, "copy", pa, col);
+    }
+  }
+
+  // original nodes (fade to a dashed ghost once copied)
+  for (const n of nodes) {
+    const a = cowAlpha(n.id, t);
+    drawNode(n, n.x, n.y, "base", breath * (1 - a * (1 - slideK)), col, st.gen);
+    drawNode(n, n.x, n.y, "ghost", a * (1 - slideK), col);
+  }
+
+  // copies
+  for (const n of nodes) {
+    const a = cowAlpha(n.id, t);
+    if (a <= 0) continue;
+    const [x, y] = copyPos(n, t);
+    const e = st.cow.get(n.id);
+    const pop = 1 - clamp((t - e.born) / appear());
+    ctx.save();
+    ctx.translate(x, y); ctx.scale(1 + 0.12 * pop, 1 + 0.12 * pop); ctx.translate(-x, -y);
+    drawNode(n, x, y, "copy", a, col, st.gen + 1);
+    ctx.restore();
+    // re-touched in place: brief ring
+    const tk = (t - e.touch) / (320 / cfg.speed);
+    if (tk > 0 && tk < 1) {
+      ctx.save(); ctx.globalAlpha = (1 - tk) * a; ctx.strokeStyle = col; ctx.lineWidth = 2;
+      rr(x - n.w / 2 - 8 * tk, y - n.h / 2 - 8 * tk, n.w + 16 * tk, n.h + 16 * tk, 12); ctx.stroke();
+      ctx.restore();
+    }
+  }
+
+  // commit flash on the new root
+  if (committing) {
+    const k = (t - st.t0) / 500;
+    if (k < 1) {
+      const n = nodes[ROOT], [x, y] = copyPos(n, t);
+      ctx.save(); ctx.globalAlpha = 1 - k; ctx.strokeStyle = "#ffffff"; ctx.lineWidth = 3;
+      ctx.shadowColor = "#ffffff"; ctx.shadowBlur = 30;
+      rr(x - n.w / 2 - 30 * k, y - n.h / 2 - 30 * k, n.w + 60 * k, n.h + 60 * k, 14); ctx.stroke();
+      ctx.restore();
+    }
+  }
+
+  // pulses travelling leaf -> root
+  st.pulses = st.pulses.filter(p => t - p.t0 < seg() * (p.path.length - 1) + 250);
+  for (const p of st.pulses) {
+    const total = seg() * (p.path.length - 1);
+    for (let trail = 0; trail < 7; trail++) {
+      const k = clamp((t - p.t0 - trail * 14) / total);
+      const f = k * (p.path.length - 1), i = Math.min(Math.floor(f), p.path.length - 2), r = f - i;
+      const [x1, y1] = copyPos(nodes[p.path[i]], t), [x2, y2] = copyPos(nodes[p.path[i + 1]], t);
+      const x = lerp(x1, x2, r), y = lerp(y1 - nodes[p.path[i]].h / 2, y2 + nodes[p.path[i + 1]].h / 2, r);
+      const fade = 1 - clamp((t - p.t0 - total) / 250);
+      ctx.save();
+      ctx.globalAlpha = fade * (1 - trail / 7);
+      ctx.fillStyle = trail ? col : "#ffffff";
+      ctx.shadowColor = col; ctx.shadowBlur = 16;
+      ctx.beginPath(); ctx.arc(x, y, 6 - trail * 0.6, 0, Math.PI * 2); ctx.fill();
+      ctx.restore();
+    }
+  }
+
+  // aborted copies falling apart
+  st.dying = st.dying.filter(d => t - d.t0 < 1100);
+  for (const d of st.dying) {
+    const e = t - d.t0, n = nodes[d.id];
+    const x = d.x + d.vx * e, y = d.y + d.vy * e + 0.0016 * e * e;
+    ctx.save();
+    ctx.translate(x, y); ctx.rotate(d.vr * e); ctx.translate(-x, -y);
+    drawNode(n, x, y, "copy", 1 - e / 1100, C.err, st.gen + 1);
+    ctx.restore();
+  }
+
+  // annotations
+  if (cfg.labels && !committing) {
+    ctx.save();
+    ctx.font = "16px ui-monospace, monospace"; ctx.textBaseline = "middle";
+    const ra = cowAlpha(ROOT, t), rn = nodes[ROOT];
+    if (ra > 0) {
+      ctx.globalAlpha = ra * 0.9;
+      ctx.fillStyle = C.text; ctx.textAlign = "right";
+      ctx.fillText(`old root · gen ${st.gen} · still intact`, rn.x - rn.w / 2 - 28, rn.y + 14);
+      ctx.fillStyle = col; ctx.textAlign = "left";
+      ctx.fillText(`new root · gen ${st.gen + 1} · uncommitted`, rn.x + DX + rn.w / 2 + 28, rn.y + DY);
+    }
+    ctx.globalAlpha = 0.75; ctx.fillStyle = C.dim; ctx.textAlign = "center";
+    ctx.fillText(st.chars
+      ? "each keystroke copies a leaf and its path up to the root · untouched blocks are shared, never overwritten"
+      : "btrfs never overwrites a block: changes are written as new copies, then a new root is committed",
+      W / 2, 170);
+    ctx.restore();
+  }
+
+  drawPrompt(t);
+
+  // red flash on abort
+  const fk = (t - st.flashT) / 600;
+  if (fk >= 0 && fk < 1) { ctx.fillStyle = rgba(C.err, 0.16 * (1 - fk)); ctx.fillRect(0, 0, W, H); }
+
+  // white bloom on commit, the counterpart of the red flash
+  if (committing) {
+    const bk = (t - st.t0) / 450;
+    if (bk < 1) {
+      const bg = ctx.createRadialGradient(W / 2, 300, 0, W / 2, 300, 900);
+      bg.addColorStop(0, `rgba(255,255,255,${0.14 * (1 - bk)})`); bg.addColorStop(1, "rgba(255,255,255,0)");
+      ctx.fillStyle = bg; ctx.fillRect(0, 0, W, H);
+    }
+  }
+
+  // hand-off: fade to black
+  if (committing) {
+    const k = clamp((t - st.t0 - 1600) / 800);
+    if (k > 0) { ctx.fillStyle = `rgba(0,0,0,${k})`; ctx.fillRect(0, 0, W, H); }
+    const tk = clamp((t - st.t0 - 2300) / 500);
+    if (tk > 0) {
+      ctx.save(); ctx.globalAlpha = tk;
+      ctx.font = "22px ui-monospace, monospace"; ctx.textAlign = "center"; ctx.fillStyle = C.text;
+      ctx.fillText("mounting subvol=/@ · starting Hyprland", W / 2, H / 2);
+      if (st.phase === "done") {
+        ctx.globalAlpha = tk * (0.45 + 0.25 * Math.sin(t / 400));
+        ctx.font = "16px ui-monospace, monospace"; ctx.fillStyle = C.dim;
+        ctx.fillText("(mockup) press any key to replay", W / 2, H / 2 + 44);
+      }
+      ctx.restore();
+    }
+  }
+}
+
+function drawPrompt(t) {
+  const pw = 640, ph = 78, py = 790;
+  let px = W / 2;
+  const sk = (t - st.shakeT) / 480;
+  if (sk >= 0 && sk < 1) px += Math.sin(sk * Math.PI * 9) * 16 * (1 - sk);
+
+  let col = cfg.accent;
+  if (st.phase === "abort" || (st.msgColor === C.err && t - st.msgT < 700)) col = C.err;
+  if (st.phase === "commit" || st.phase === "done") col = C.ok;
+
+  ctx.save();
+  ctx.font = "15px ui-monospace, monospace"; ctx.textAlign = "left"; ctx.textBaseline = "alphabetic";
+  ctx.fillStyle = C.dim;
+  ctx.fillText(`passphrase for ${DEV}  (luks-fb1903f3…)`, px - pw / 2 + 4, py - ph / 2 - 12);
+
+  rr(px - pw / 2, py - ph / 2, pw, ph, 14);
+  ctx.fillStyle = "rgba(14,19,28,0.92)"; ctx.fill();
+  ctx.strokeStyle = rgba(col, 0.55); ctx.lineWidth = 1.5; ctx.stroke();
+
+  // padlock
+  const lx = px - pw / 2 + 40, ly = py + 4;
+  ctx.strokeStyle = col; ctx.lineWidth = 3;
+  ctx.beginPath(); ctx.arc(lx, ly - 10, 9, Math.PI, 0); ctx.lineTo(lx + 9, ly - 4); ctx.moveTo(lx - 9, ly - 10); ctx.lineTo(lx - 9, ly - 4); ctx.stroke();
+  ctx.fillStyle = col; rr(lx - 14, ly - 4, 28, 20, 4); ctx.fill();
+
+  // one small block per character (blocks, not dots — it's a filesystem)
+  const max = 22, n = Math.min(st.chars, max), bs = 16, gap = 8;
+  const x0 = px - pw / 2 + 80;
+  for (let i = 0; i < n; i++) {
+    let a = 1;
+    if (st.phase === "check") a = 0.35 + 0.65 * (0.5 + 0.5 * Math.sin((t - st.t0) / 110 - i * 0.6));
+    ctx.globalAlpha = a; ctx.fillStyle = col;
+    ctx.shadowColor = col; ctx.shadowBlur = 8;
+    rr(x0 + i * (bs + gap), py - bs / 2, bs, bs, 3); ctx.fill();
+  }
+  ctx.shadowBlur = 0; ctx.globalAlpha = 1;
+  if (st.chars > max) {
+    ctx.fillStyle = C.text; ctx.font = "15px ui-monospace, monospace"; ctx.textBaseline = "middle";
+    ctx.fillText("+" + (st.chars - max), x0 + max * (bs + gap), py);
+  }
+  if (st.phase === "input" && Math.floor(t / 530) % 2 === 0) {
+    ctx.fillStyle = rgba(col, 0.7);
+    ctx.fillRect(x0 + n * (bs + gap) + (st.chars > max ? 44 : 0), py - 13, 3, 26);
+  }
+
+  // message line
+  if (st.msg) {
+    ctx.globalAlpha = clamp((t - st.msgT) / 200);
+    ctx.font = "17px ui-monospace, monospace"; ctx.textAlign = "center"; ctx.textBaseline = "middle";
+    ctx.fillStyle = st.msgColor;
+    ctx.fillText(st.msg, W / 2, py + ph / 2 + 36);
+  }
+
+  // footer
+  ctx.globalAlpha = 0.8;
+  ctx.font = "15px ui-monospace, monospace"; ctx.textAlign = "center"; ctx.fillStyle = C.dim;
+  ctx.fillText(`${HOST}  ·  linux ${KERNEL}`, W / 2, H - 48);
+  ctx.restore();
+}
+
+// ---------------------------------------------------------------- loop
+let last = performance.now();
+function frame() {
+  const t = performance.now();   // same clock as the key handler
+  const dt = Math.min(50, t - last); last = t;
+  // GC copies that finished fading out after a backspace
+  for (const [id, e] of st.cow) if (e.removing != null && t - e.removing > 240) st.cow.delete(id);
+  if (st.phase === "check" && t - st.t0 > 900) st.ok ? commit(t) : abort(t);
+  if (st.phase === "abort" && t - st.t0 > 700) st.phase = "input";
+  // Screen is black by now, so the tree can quietly become the committed one.
+  if (st.phase === "commit" && t - st.t0 > 2900) { st.phase = "done"; st.gen++; st.cow.clear(); }
+  render(t, dt);
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+
+// ---------------------------------------------------------------- controls
+const sw = document.getElementById("swatches");
+ACCENTS.forEach((a, i) => {
+  const b = document.createElement("button");
+  b.className = "swatch" + (i === 0 ? " on" : ""); b.style.background = a; b.title = a;
+  b.onclick = () => { cfg.accent = a; sw.querySelectorAll(".swatch").forEach(s => s.classList.toggle("on", s === b)); stage.focus(); };
+  sw.appendChild(b);
+});
+const sp = document.getElementById("speed");
+sp.oninput = () => { cfg.speed = +sp.value; document.getElementById("speedv").textContent = cfg.speed.toFixed(1) + "×"; };
+document.getElementById("labels").onchange = e => { cfg.labels = e.target.checked; stage.focus(); };
+document.getElementById("reset").onclick = () => { reset(); stage.focus(); };
+const stage = document.getElementById("stage");
+stage.addEventListener("click", () => stage.focus());
+stage.focus();
+</script>
+</body>
+</html>
