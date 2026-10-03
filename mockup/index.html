@@ -63,7 +63,7 @@
 // it can be ported to Plymouth's Sprite/Image API (edges become small PNGs).
 const W = 1920, H = 1080;
 const DX = 20, DY = -20;               // offset of a CoW copy from its original
-const HOST = "my-hostname", KERNEL = "7.2.8-2-cachyos", DEV = "nvme0n1p2";
+const HOST = "my-hostname", KERNEL = "7.2.8-2-cachyos", DEV = "nvme0n1p2", MODEL = "KINGSTON SA2000M81000G";
 
 const C = {
   bg0: "#0d121b", bg1: "#06080c",
@@ -182,7 +182,7 @@ function submit(t) {
   if (st.chars === 0) return;
   st.phase = "check"; st.t0 = t;
   st.ok = typed === document.getElementById("pw").value;
-  say("unlocking " + DEV + " …", C.text, t);
+  say("unlocking ...", C.text, t);
 }
 function abort(t) {
   for (const [id, e] of st.cow) {
@@ -194,11 +194,11 @@ function abort(t) {
   st.cow.clear(); st.stack = []; st.chars = 0; typed = "";
   st.phase = "abort"; st.t0 = t; st.shakeT = t; st.flashT = t;
   st.attempt++;
-  say(`transaction aborted · generation ${st.gen} unchanged · attempt ${st.attempt}`, C.err, t);
+  say(`transaction aborted  |  generation ${st.gen} unchanged  |  attempt ${st.attempt}`, C.err, t);
 }
 function commit(t) {
   st.phase = "commit"; st.t0 = t;
-  say(`transaction committed · generation ${st.gen + 1}`, C.ok, t);
+  say(`transaction committed  |  generation ${st.gen + 1}`, C.ok, t);
 }
 
 window.addEventListener("keydown", ev => {
@@ -400,13 +400,13 @@ function render(t, dt) {
     if (ra > 0) {
       ctx.globalAlpha = ra * 0.9;
       ctx.fillStyle = C.text; ctx.textAlign = "right";
-      ctx.fillText(`old root · gen ${st.gen} · still intact`, rn.x - rn.w / 2 - 28, rn.y + 14);
+      ctx.fillText(`old root  |  gen ${st.gen}  |  still intact`, rn.x - rn.w / 2 - 28, rn.y + 14);
       ctx.fillStyle = col; ctx.textAlign = "left";
-      ctx.fillText(`new root · gen ${st.gen + 1} · uncommitted`, rn.x + DX + rn.w / 2 + 28, rn.y + DY);
+      ctx.fillText(`new root  |  gen ${st.gen + 1}  |  uncommitted`, rn.x + DX + rn.w / 2 + 28, rn.y + DY);
     }
     ctx.globalAlpha = 0.75; ctx.fillStyle = C.dim; ctx.textAlign = "center";
     ctx.fillText(st.chars
-      ? "each keystroke copies a leaf and its path up to the root · untouched blocks are shared, never overwritten"
+      ? "each keystroke copies a leaf and its path up to the root  |  untouched blocks are shared, never overwritten"
       : "btrfs never overwrites a block: changes are written as new copies, then a new root is committed",
       W / 2, 170);
     ctx.restore();
@@ -436,7 +436,7 @@ function render(t, dt) {
     if (tk > 0) {
       ctx.save(); ctx.globalAlpha = tk;
       ctx.font = "22px ui-monospace, monospace"; ctx.textAlign = "center"; ctx.fillStyle = C.text;
-      ctx.fillText("mounting subvol=/@ · starting Hyprland", W / 2, H / 2);
+      ctx.fillText("mounting subvol=/@  |  starting Hyprland", W / 2, H / 2);
       if (st.phase === "done") {
         ctx.globalAlpha = tk * (0.45 + 0.25 * Math.sin(t / 400));
         ctx.font = "16px ui-monospace, monospace"; ctx.fillStyle = C.dim;
@@ -460,7 +460,7 @@ function drawPrompt(t) {
   ctx.save();
   ctx.font = "15px ui-monospace, monospace"; ctx.textAlign = "left"; ctx.textBaseline = "alphabetic";
   ctx.fillStyle = C.dim;
-  ctx.fillText(`passphrase for ${DEV}  (luks-fb1903f3…)`, px - pw / 2 + 4, py - ph / 2 - 12);
+  ctx.fillText(`passphrase for ${DEV}  |  ${MODEL}`, px - pw / 2 + 4, py - ph / 2 - 12);
 
   rr(px - pw / 2, py - ph / 2, pw, ph, 14);
   ctx.fillStyle = "rgba(14,19,28,0.92)"; ctx.fill();
@@ -503,7 +503,7 @@ function drawPrompt(t) {
   // footer
   ctx.globalAlpha = 0.8;
   ctx.font = "15px ui-monospace, monospace"; ctx.textAlign = "center"; ctx.fillStyle = C.dim;
-  ctx.fillText(`${HOST}  ·  linux ${KERNEL}`, W / 2, H - 48);
+  ctx.fillText(`${HOST}  |  linux ${KERNEL}`, W / 2, H - 48);
   ctx.restore();
 }
 
