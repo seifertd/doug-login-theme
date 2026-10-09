@@ -4,6 +4,8 @@ A Plymouth theme for the LUKS passphrase prompt. Every keystroke copies a leaf
 block and its path up to a new root, the way btrfs writes. A wrong passphrase
 aborts the transaction; the right one commits it and hands off to the session.
 
+![btrfs-cow after four keystrokes: the copied path glows up to a new, uncommitted root](docs/screenshot.png)
+
 `mockup/index.html` is the browser prototype the theme was ported from.
 
 ## Use
